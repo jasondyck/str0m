@@ -679,8 +679,8 @@ internal timers or threads.
 ### Pacer Control
 
 **Location:** `src/pacer/control.rs`
-**WebRTC:** `modules/congestion_controller/goog_cc/send_side_bandwidth_estimation.cc`
-(rate calculation)
+**WebRTC:** `modules/congestion_controller/goog_cc/goog_cc_network_control.cc`
+(`GetPacingRates`)
 
 Calculates pacing and padding rates based on the BWE estimate. The pacing
 rate is set to 1.1× the estimate (`PACING_FACTOR`), providing a 10%
@@ -690,20 +690,39 @@ encoder bitrate fluctuations would constantly hit the pacing limit, causing
 unnecessary queuing delays. This rate controls how the pacer smooths media
 transmission timing.
 
-The padding rate determines how much additional traffic to inject to
-maintain NAT bindings and keep RTX state warm. Padding is enabled when the
-current bitrate exceeds 50 kbps (`MIN_PADDING_THRESHOLD`)—below this, we're
-barely sending anything and padding isn't needed. It's disabled during
-overuse conditions to avoid worsening congestion by adding unnecessary
-traffic. When active, the padding target is 50 kbps (`PADDING_TARGET`),
-sufficient to keep middleboxes alive without adding significant overhead.
-Authorized probe clusters use their own target rates, including when the regular
-padding rate is zero.
+The application configures `Bwe::set_bitrate(minimum, desired)`. The minimum
+is a total transmit target: when media falls short, regular padding fills
+available gaps. The desired bitrate tells the probe controller how much
+capacity to discover; it is not a hard ceiling. The minimum is clamped to
+the desired bitrate. To migrate from `set_desired_bitrate(desired)`, use
+`set_bitrate(Bitrate::ZERO, desired)`.
 
-This differs from WebRTC, which bases padding decisions on the minimum
-simulcast layer bitrate (typically 30 kbps). str0m uses a fixed 50 kbps
-threshold instead, taking a simulcast-agnostic approach that works for any
-stream configuration.
+Regular padding uses `min(max(50 kbps, minimum), estimate)`. The automatic
+50 kbps target maintains NAT bindings and RTX state. Padding is suppressed
+during overuse and when there is no active sending media section. Sending
+also requires an available media padding source; SSRC 0 remains restricted
+to authorized probe clusters. Media bytes count against the padding budget,
+so this target is not extra traffic added on top of media. Lowering the
+minimum reduces the target immediately. Both configured rates survive a
+BWE reset, and the effective padding rate follows the new estimate.
+
+An SFU can request a minimum near its next layer's startup requirement
+while retaining a higher desired bitrate. Padding can then sustain traffic
+near the current estimate, giving passive estimation evidence to increase
+without first switching the media layer. Changing only the minimum does
+not force a probe. Authorized probe clusters retain their own target rates,
+including when the regular padding rate is zero.
+
+WebRTC calculates a per-stream padding target from active layers. Without
+ALR probing it targets the highest active layer's startup requirement,
+including lower simulcast streams and hysteresis (1.2 for video, 1.35 for
+screen sharing). With ALR probing it uses the lowest stream's minimum and
+relies on probes for ramp-up. Its configured minimum transmit bitrate can
+raise either target. The allocator sums targets, including restart needs
+for suspended streams; GoogCC caps padding by the congestion-controlled
+rate. Its loss controller can also request padding during recovery.
+str0m has no encoders or layer allocator: the application supplies the
+minimum transmit target, and str0m applies its estimate cap and overuse gate.
 
 The calculated pacing_rate and padding_rate flow to the Pacer, controlling
 transmission smoothing and padding generation respectively.
@@ -735,10 +754,12 @@ transmission smoothing and padding generation respectively.
      ALR entry. Probes at 2× estimate after 15s stagnation with 15s rate limit
 
 3. **Padding Strategy:**
-   - **WebRTC**: Based on min simulcast layer bitrate (~30 kbps)
-   - **str0m**: Fixed 50 kbps threshold and target
-   - **Reason**: Simulcast-agnostic design
-   - **Impact**: Slightly higher padding in audio-only scenarios
+   - **WebRTC**: Layer-derived targets, configured minimum transmit bitrate,
+     and allocator/recovery state, capped by the congestion-controlled rate
+   - **str0m**: Application minimum transmit target with an automatic 50 kbps
+     floor, capped by the estimate and suppressed during overuse
+   - **Reason**: The application knows layer startup requirements; str0m has no encoder
+   - **Impact**: Fixed-layer senders can sustain traffic to support estimate growth
 
 4. **Bitrate Constraints:**
    - **WebRTC**: Separate `max_bitrate` (hard cap) and

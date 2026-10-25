@@ -9,6 +9,7 @@ mod changing;
 mod delay;
 mod estimate;
 mod loss;
+mod minimum;
 mod probes;
 mod recovery;
 mod simple;
