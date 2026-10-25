@@ -1,6 +1,6 @@
 # Unreleased
 
-  * Probe for increased desired bandwidth outside the application-limited region
+  * Probe for increased desired bandwidth outside the application-limited region #1108
   * Bump dimpl to 0.9.0 and raise MSRV to Rust 1.89 (breaking) #1110
   * Remove the fixed video reordering timeout setting (breaking) #1078
   * Wait for NACK recovery and a complete successor before expiring incomplete video frames #1078
